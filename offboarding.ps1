@@ -107,16 +107,27 @@ $offboardButton.Add_Click({
     # Fortsett med offboarding-prosessen
     try {
         # Deaktiver brukerkontoen
-        Disable-ADAccount -Identity $user
+        Disable-ADAccount -Identity $user -ErrorAction Stop
 
-        # Flytt brukeren til "Deaktiverte brukere" OU
-        $disabledUsersOU = "OU=Deaktiverte brukere,DC=lukasstiftelsen,DC=no"
-        Move-ADObject -Identity $user.DistinguishedName -TargetPath $disabledUsersOU
+        # Output user's distinguished name for verification
+        Write-Host "Brukerens DN: $($user.DistinguishedName)"
 
         # Fjern brukeren fra alle grupper unntatt "Domain Users"
-        $groups = Get-ADPrincipalGroupMembership -Identity $user | Where-Object { $_.Name -ne 'Domain Users' }
+        $groups = Get-ADPrincipalGroupMembership -Identity $user -ErrorAction Stop
         foreach ($group in $groups) {
-            Remove-ADGroupMember -Identity $group -Members $user -Confirm:$false
+            if ($group.Name -ne "Domain Users") {
+                Remove-ADGroupMember -Identity $group -Members $user -Confirm:$false -ErrorAction Stop
+            }
+        }
+
+        # Finn "Deaktiverte brukere" OU dynamisk
+        $disabledUsersOU = Get-ADOrganizationalUnit -Filter { Name -eq "Deaktiverte brukere" }
+
+        if ($disabledUsersOU) {
+            # Flytt brukeren til "Deaktiverte brukere" OU
+            Move-ADObject -Identity $user.DistinguishedName -TargetPath $disabledUsersOU.DistinguishedName -ErrorAction Stop
+        } else {
+            throw "Mål-OU 'Deaktiverte brukere' ble ikke funnet i domenet."
         }
 
         # Azure Storage informasjon
@@ -124,10 +135,15 @@ $offboardButton.Add_Click({
         $resourceGroupName = "Lukas-Norway-RG"      # Sett til ditt resource group navn
         $shareName = "fslogix"                      # Sett til ditt fileshare navn
 
-        # Koble til Azure hvis ikke allerede tilkoblet
-        if (-not (Get-AzContext)) {
-            Connect-AzAccount
+        # Koble til Azure
+        Connect-AzAccount
+
+        # Test access to the storage account
+        $storageAccount = Get-AzStorageAccount -ResourceGroupName $resourceGroupName -Name $storageAccountName -ErrorAction Stop
+        if (-not $storageAccount) {
+        throw "Kan ikke få tilgang til lagringskontoen $storageAccountName."
         }
+
 
         # Hent Storage Account nøkkel
         $storageKey = (Get-AzStorageAccountKey -ResourceGroupName $resourceGroupName -Name $storageAccountName)[0].Value
@@ -140,19 +156,40 @@ $offboardButton.Add_Click({
         New-PSDrive -Name $psDriveName -PSProvider FileSystem -Root "\\$($storageAccountName).file.core.windows.net\$shareName" -Credential (New-Object PSCredential -ArgumentList "Azure\$storageAccountName", (ConvertTo-SecureString -String $storageKey -AsPlainText -Force)) -ErrorAction Stop
 
         # Finn .vhd-filer for brukeren
-        $vhdFileNamePattern = "$($user.SamAccountName)*.vhd*"
-
-        # Hent filene
-        $vhdFiles = Get-ChildItem -Path "$psDriveName:\" -Recurse -Filter $vhdFileNamePattern
+        $vhdFiles = Get-ChildItem -Path "${psDriveName}:\\" -Recurse -Filter "*.vhd*" | Where-Object { $_.Name -like "*$($user.SamAccountName)*" }
 
         if ($vhdFiles.Count -gt 0) {
-            # Slett .vhd-filene
             foreach ($vhdFile in $vhdFiles) {
-                Remove-Item -Path $vhdFile.FullName -Force
+                # Close any open handles to the file
+                # Note: Closing open file handles can be risky; ensure it's safe to do so.
+                $openFiles = Get-SmbOpenFile | Where-Object { $_.Path -like "*$($vhdFile.FullName)*" }
+                foreach ($openFile in $openFiles) {
+                    Close-SmbOpenFile -FileId $openFile.FileId -Force
+                }
+
+                # Implement a retry mechanism
+                $maxRetries = 5
+                $retryDelay = 10 # seconds
+                $attempt = 0
+                $deleted = $false
+
+                while (-not $deleted -and $attempt -lt $maxRetries) {
+                    try {
+                        Remove-Item -Path $vhdFile.FullName -Force -ErrorAction Stop
+                        $deleted = $true
+                    } catch {
+                        $attempt++
+                        Start-Sleep -Seconds $retryDelay
+                    }
+                }
+
+                if (-not $deleted) {
+                    throw "Could not delete file $($vhdFile.FullName) after $maxRetries attempts."
+                }
             }
-            [System.Windows.Forms.MessageBox]::Show("Brukeren $name er offboardet, og tilhørende .vhd-filer er slettet.")
+            [System.Windows.Forms.MessageBox]::Show("Brukeren ${name} er offboardet, og tilhørende .vhd-filer er slettet.")
         } else {
-            [System.Windows.Forms.MessageBox]::Show("Brukeren $name er offboardet, men ingen .vhd-filer ble funnet.")
+            [System.Windows.Forms.MessageBox]::Show("Brukeren ${name} er offboardet, men ingen .vhd-filer ble funnet.")
         }
 
         # Fjern PSDrive
@@ -162,7 +199,7 @@ $offboardButton.Add_Click({
         $form.Close()
     }
     catch {
-        [System.Windows.Forms.MessageBox]::Show("Feil ved offboarding av brukeren $name: $($_.Exception.Message)")
+        [System.Windows.Forms.MessageBox]::Show("Feil ved offboarding av brukeren ${name}: $($_.Exception.Message)")
     }
 })
 
