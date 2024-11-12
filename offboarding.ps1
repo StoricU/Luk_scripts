@@ -152,11 +152,11 @@ $offboardButton.Add_Click({
         $storageContext = New-AzStorageContext -StorageAccountName $storageAccountName -StorageAccountKey $storageKey
 
         # Monter fileshare som PSDrive
-        $psDriveName = "FSLogixShare"
-        New-PSDrive -Name $psDriveName -PSProvider FileSystem -Root "\\$($storageAccountName).file.core.windows.net\$shareName" -Credential (New-Object PSCredential -ArgumentList "Azure\$storageAccountName", (ConvertTo-SecureString -String $storageKey -AsPlainText -Force)) -ErrorAction Stop
+        # $psDriveName = "FSLogixShare"
+        New-PSDrive -Name "FSLogixShare" -PSProvider FileSystem -Root "\\$($storageAccountName).file.core.windows.net\$shareName" -Credential (New-Object PSCredential -ArgumentList "Azure\$storageAccountName", (ConvertTo-SecureString -String $storageKey -AsPlainText -Force))
 
         # Finn .vhd-filer for brukeren
-        $vhdFiles = Get-ChildItem -Path "${psDriveName}:\\" -Recurse -Filter "*.vhd*" | Where-Object { $_.Name -like "*$($user.SamAccountName)*" }
+        $vhdFiles = Get-ChildItem -Path "FSLogixShare:\" -Recurse -Filter "*.vhd*" | Where-Object { $_.Name -like "*$user*" }
 
         if ($vhdFiles.Count -gt 0) {
             foreach ($vhdFile in $vhdFiles) {
@@ -168,7 +168,7 @@ $offboardButton.Add_Click({
                 }
 
                 # Implement a retry mechanism
-                $maxRetries = 5
+                $maxRetries = 1
                 $retryDelay = 10 # seconds
                 $attempt = 0
                 $deleted = $false
@@ -193,7 +193,7 @@ $offboardButton.Add_Click({
         }
 
         # Fjern PSDrive
-        Remove-PSDrive -Name $psDriveName
+        Remove-PSDrive -Name "FSLogixShare"
 
         # Lukk formen
         $form.Close()
